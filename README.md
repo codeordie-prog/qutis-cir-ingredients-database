@@ -49,6 +49,56 @@ python scripts/import_to_postgres.py --truncate
 
 Point Nova `.env` at the same database (`POSTGRES_TABLE=cir_pdfs`) and run product-review flows.
 
+## Using this data with Nova (Pinecone + PDF storage)
+
+Importing the CSV gives you **ingredient metadata and public CIR links**. A full **Qutis product safety check** in [Nova](https://github.com/codeordie-prog/Nova) also needs a **vector search** stack: Pinecone for embeddings and a **stable PDF URL** per row for the rules engine to download, chunk, and index report text.
+
+### 1. Pinecone index
+
+Create a serverless Pinecone index compatible with Nova’s rules engine (defaults in code):
+
+| Setting | Value |
+|---------|--------|
+| Index name | `qutis-index` |
+| Dimensions | `1536` |
+| Metric | `cosine` |
+
+In Nova `.env` set:
+
+- `PINECONE_API_KEY_QUTIS` — your Pinecone API key  
+- `OPENAI_API_KEY_QUTIS` — used for `text-embedding-3-small` when indexing and querying chunks  
+
+From the Nova repo you can create the index once:
+
+```bash
+cd /path/to/Nova
+poetry run python -m dermascan.rules_engine.vector_store.build_index
+```
+
+Vectors are stored under the `cir` namespace inside that index. On the first safety check for an ingredient, Nova **lazy-indexes** the PDF (download → extract → embed → upsert) if it is not already in Pinecone.
+
+### 2. PDF hosting (your S3, Firebase, GCS, or similar)
+
+This dataset does **not** ship PDF files or production Firebase mirrors. Each row includes **`pdf_source_url`** / **`attachment_url`** pointing at the **public CIR** viewer.
+
+For production-like behavior you should:
+
+1. Use `pdf_source_url` (or the CIR `attachment_view_url`) to **download** each report PDF (respect CIR terms and rate limits).  
+2. Upload PDFs to **your** object storage (AWS S3, Google Cloud Storage, Firebase Storage, Azure Blob, etc.).  
+3. Update Postgres `cir_pdfs.download_url` (and optionally `storage_bucket` / `storage_path`) to **HTTPS URLs** your Nova workers can fetch.
+
+The rules engine loads PDFs via `download_url` when building the Pinecone index. You can start locally with **`download_url` = public CIR URLs** (as `import_to_postgres.py` does); mirroring to your own bucket improves reliability and speed when you run many safety checks.
+
+### 3. End-to-end checklist
+
+1. Import `data/ingredients.csv` into Postgres (`POSTGRES_TABLE=cir_pdfs`).  
+2. Ensure each row used in product review has a fetchable `download_url` (public CIR or your storage).  
+3. Configure `PINECONE_API_KEY_QUTIS`, `OPENAI_API_KEY_QUTIS`, and `REDIS_URL` in Nova.  
+4. Create the `qutis-index` Pinecone index.  
+5. Run Nova workers and trigger a product review — indexing runs on demand per ingredient.
+
+More detail: Nova `README.md` (§ PostgreSQL & rules engine) and `dermascan/rules_engine/vector_store/search.md`.
+
 ## Regenerate CSV (maintainers)
 
 Requires read access to the production `cir_pdfs` table:
